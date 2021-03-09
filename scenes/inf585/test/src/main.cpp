@@ -101,10 +101,11 @@ mesh_drawable waterfall;
 mesh_drawable rocks;
 mesh_drawable trees;
 mesh_drawable sphere_particle;
+mesh_drawable quad;
 std::vector<mesh_drawable> terrain;
 vec3 starting_pos = { 4.0f,0,0.8f*(std::atan(10.0f * (-0.5f + 4.0f)) - std::atan(-5.0f)) + 0.2f * 4.0f };
 
-timer_event_periodic timer_pop(0.02f);  // Timer with periodic event
+timer_event_periodic timer_pop(0.05f);  // Timer with periodic event
 
 timer_basic timer;
 
@@ -205,7 +206,7 @@ void initialize_data()
 	scene.camera.look_at({ 2,3,2 }, { 0,0,0 }, { 0,0,1 });
 
 	sphere_particle = mesh_drawable(mesh_primitive_sphere());
-	sphere_particle.transform.scale = 0.01f;
+	sphere_particle.transform.scale = 0.05f;
 
 	
 	waterfall = mesh_drawable(create_fond());
@@ -221,6 +222,7 @@ void initialize_data()
 
 	trees = mesh_drawable(mesh_load_file_obj("../assets/Tree.obj"));
 	trees.texture = opengl_texture_to_gpu(image_load_png("../assets/bark_0021.png"));
+
 
 }
 
@@ -303,10 +305,23 @@ void display_scene(float current_time)
 	trees.transform.rotate = rotation({ 1,0,0 }, 1.57f);
 	trees.transform.scale = 0.1f;
 	draw(trees, scene);
+
 	for (size_t k = 0; k < particles.size(); ++k) {
-		vec3 const& p = particles[k].p + vec3(0,0,0.02);
+		vec3 const& p = particles[k].p;
 		sphere_particle.transform.translate = p;
+		float color = 0;
+		float d = 0.15f;
+		for (size_t i = 0; i < particles.size(); i++) {
+			if (i == k) {
+				continue;
+			}
+			float const r = norm(p - particles[i].p) / d;
+			color += 0.25f * std::exp(-r * r);
+		}
+		sphere_particle.shading.color = vec3(clamp(1 - color, 0, 1), clamp(1 - color, 0, 1), 1);
 		draw(sphere_particle, scene);
+
+		
 	}
 }
 
@@ -500,7 +515,7 @@ void remove_old_particles(float current_time) {
 	for (auto it = particles.begin(); it != particles.end();)
 	{
 		// if a particle is too old, remove it
-		if (current_time - it->t > 100) { // change time I guess
+		if (current_time - it->t > 200) { // change time I guess
 			it = particles.erase(it);
 		}
 		// Go to the next particle if we are not already on the last one
@@ -697,6 +712,7 @@ void mouse_move_callback(GLFWwindow* window, double xpos, double ypos)
 		if (state.mouse_click_right)
 			camera.manipulator_scale_distance_to_center((p1 - p0).y);
 	}
+
 
 	user.mouse_prev = p1;
 }
