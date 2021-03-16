@@ -6,6 +6,9 @@
 
 
 #include "vcl/vcl.hpp"
+#include "simulation.hpp"
+#include "marching_cubes.hpp"
+
 #include <iostream>
 
 using namespace vcl;
@@ -30,31 +33,7 @@ struct scene_environment
 };
 scene_environment scene; // Generic elements of the scene (camera, light, etc.)
 
-struct particle_element
-{
-	vcl::vec3 p; // Position
-	vcl::vec3 v; // Speed
-	vcl::vec3 f; // Force
-	float t;
-	float rho;      // density at this particle position
-	float pressure; // pressure at this particle position
-	particle_element() : p{ 0,0,0 }, v{ 0,0,0 }, f{ 0,0,0 }, t(0),rho(0), pressure(0) {}
-};
 
-// SPH simulation parameters
-struct sph_parameters_structure
-{
-	// Influence distance of a particle (size of the kernel)
-	float h = 0.12f;
-	// Rest density (normalized to 1 - real unit should be 1000kg/m^2)
-	float rho0 = 1;
-	// Total mass of a particle (consider rho0 h^2)
-	float m = rho0 * h * h;
-	// viscosity parameter
-	float nu = 0.05f;
-	// Stiffness converting density to pressure
-	float stiffness = 0.3f;
-};
 
 sph_parameters_structure sph_parameters;
 
@@ -68,28 +47,30 @@ void window_size_callback(GLFWwindow* window, int width, int height);
 
 
 void initialize_data(); // Initialize the data of this scene
-void create_new_particle(float current_time);
+void create_new_particle(float current_time); // create a new particle with speed towards the waterfall
 void display_scene(float current_time);
-void remove_old_particles(float current_time);
-mesh create_fond();
-mesh create_terrain(int k);
-vec3 evaluate_xyz(float x, float y);
-float evaluate_z(float x, float y);
-float evaluate_y(float x);
-vec3 evaluate_z_terrain(float x, float y);
+void remove_old_particles(float current_time); // remove particle too old 
+mesh create_fond(); // for the bottom of the waterfall
+mesh create_terrain(int k); // for the grass around the waterfall
 
-// sph 
-float density_to_pressure(float rho, float rho0, float stiffness);
-float W_laplacian_viscosity(vec3 const& p_i, vec3 const& p_j, float h);
-vec3 W_gradient_pressure(vec3 const& p_i, vec3 const& p_j, float h);
-float W_density(vec3 const& p_i, const vec3& p_j, float h);
-void update_density(buffer<particle_element>& particles, float h, float m);
-void update_pressure(buffer<particle_element>& particles, float rho0, float stiffness);
-void update_force(buffer<particle_element>& particles, float h, float m, float nu);
+// the 3 following are for the waterfall ground
+vec3 evaluate_xyz(float x, float y); // given x and y, compute the correct x,y and z 
+float evaluate_z(float x, float y);// given x and y, compute the correct  z 
+float evaluate_y(float x); // given x  compute the correct y
 
-void simulate(float dt, std::vector<particle_element>& particles, sph_parameters_structure const& sph_parameters);
+// for the ground, grass around the waterfall
+vec3 evaluate_z_terrain(float x, float y); 
 
-mesh initialize_sph();
+
+// marching cube render
+vec3 grid_center = { 0,-2,-2 };
+int grid_n = 20;
+vec3 from_grid_to_world(vec3 grid_coord, vec3 center_grid, float step,int part);
+// according to the part considered (before waterfall, waterfall or lake), returns the world coordinates according to the grid's
+vec3 from_world_to_grid(vec3 world_coord, vec3 center_grid, float step);
+float get_density(float x, float y, float z, int grid_size); // to create the values for the marching cube
+vec3 get_density_2(float x, float y, float z, int grid_size,int part); // for the coloring of our surface (can't use the same as above)
+void compute_water(int part); // for a given part, compute the mesh according to the particles and the marching cube algorithm
 
 // ****************************************** //
 // Global variables
@@ -102,10 +83,13 @@ mesh_drawable rocks;
 mesh_drawable trees;
 mesh_drawable sphere_particle;
 mesh_drawable quad;
-std::vector<mesh_drawable> terrain;
-vec3 starting_pos = { 4.0f,0,0.8f*(std::atan(10.0f * (-0.5f + 4.0f)) - std::atan(-5.0f)) + 0.2f * 4.0f };
+mesh_drawable skybox;
 
-timer_event_periodic timer_pop(0.05f);  // Timer with periodic event
+std::vector<mesh_drawable> terrain; // the right and left part
+
+timer_event_periodic timer_pop(0.1f);  // Timer with periodic event
+grid_3D<int> x; // for the marching cube algorithm
+mesh_drawable water;
 
 timer_basic timer;
 
@@ -223,6 +207,15 @@ void initialize_data()
 	trees = mesh_drawable(mesh_load_file_obj("../assets/Tree.obj"));
 	trees.texture = opengl_texture_to_gpu(image_load_png("../assets/bark_0021.png"));
 
+	mesh sky = mesh_primitive_cube({ 0,0,0 }, 20);
+
+	
+	skybox = mesh_drawable(sky);
+	// skybox.texture = opengl_texture_to_gpu(image_load_png("../assets/skybox.png"));
+	create_new_particle(0.0f);
+	// compute_water();
+
+
 
 }
 
@@ -323,12 +316,21 @@ void display_scene(float current_time)
 
 		
 	}
+
+	compute_water(0);
+	draw(water, scene);
+	compute_water(1);
+	draw(water, scene);
+	compute_water(2);
+	draw(water, scene);
+
+	// draw(skybox, scene);
 }
 
 vec3 evaluate_xyz(float x, float y) {
 
 	float waterfall_height = 0.8f;
-	float winning_height = 0.2f;
+	float winning_height = 0.4f;
 	int refine = 100;
 	float lake_radius = 1.0f;
 	float profondeur_max = -1.0f;
@@ -378,7 +380,7 @@ vec3 evaluate_xyz(float x, float y) {
 float evaluate_z(float x, float y) {
 
 	float waterfall_height = 0.8f;
-	float winning_height = 0.2f;
+	float winning_height = 0.4f;
 	int refine = 100;
 	float lake_radius = 1.0f;
 	float profondeur_max = -1.0f;
@@ -421,7 +423,7 @@ float evaluate_z(float x, float y) {
 
 float evaluate_y(float x) {
 	float waterfall_height = 0.8f;
-	float winning_height = 0.2f;
+	float winning_height = 0.4f;
 	int refine = 100;
 	float lake_radius = 1.0f;
 	float profondeur_max = -1.0f;
@@ -444,7 +446,7 @@ float evaluate_y(float x) {
 
 vec3 evaluate_z_terrain(float x, float y) {
 	float waterfall_height = 0.8f;
-	float winning_height = 0.2f;
+	float winning_height = 0.4f;
 	float lake_radius = 1.0f;
 	float profondeur_max = -1.0f;
 	float river_deep = -0.2f;
@@ -505,7 +507,7 @@ vec3 evaluate_z_terrain(float x, float y) {
 
 void create_new_particle(float current_time) {
 	particle_element new_particle;
-	new_particle.p = evaluate_xyz(4.0f,0.0f) + vec3(0,rand_interval(-0.1f,0.1f),0.0f);
+	new_particle.p = evaluate_xyz(3.0f,0.0f) + vec3(0,rand_interval(-0.1f,0.1f),0.0f);
 	new_particle.v = { -0.2f,0.0f,0.0f }; // going down the cascade
 	new_particle.t = current_time;
 	particles.push_back(new_particle);
@@ -524,166 +526,120 @@ void remove_old_particles(float current_time) {
 	}
 }
 
-// Convert a density value to a pressure
-float density_to_pressure(float rho, float rho0, float stiffness)
-{
-	return stiffness * (rho - rho0);
+float get_density(float x, float y, float z, int grid_size) {
+	float density = 0.0f;
+	vec3 p0 = vec3(x, y, z);
+	float const d = 0.05f;
+	for (int i = 0; i < particles.size(); i++) {
+		vec3 const& pi = particles[i].p;
+		float const r = norm(pi - p0) / d;
+		density += 0.25f * std::exp(-r * r);
+	}
+	return density;
 }
 
-float W_laplacian_viscosity(vec3 const& p_i, vec3 const& p_j, float h)
-{
-	// To do ...
-	//  Fill it with laplacian of W_viscosity
-	float const r = norm(p_i - p_j);
-	assert_vcl_no_msg(r <= h);
-	return 45 / (3.14159f * std::pow(h, 6.0f)) * (h - r);
+vec3 get_density_2(float x, float y, float z, int grid_size,int part) {
+	float density = 0.0f;
+	vec3 p0 = vec3(x, y, z);
+	// quite clear
+	if (part == 0 || part == 1 || part == 2 ) {
+		float const d = 0.2f;
+		for (int i = 0; i < particles.size(); i++) {
+			vec3 const& pi = particles[i].p;
+			float const r = norm(pi - p0) / d;
+			density += 0.35f * std::exp(-r * r);
+		}
+
+		vec3 color = vec3(clamp(1 - density, 0, 1), clamp(1 - density, 0, 1), 1);
+
+		return color * 2.5f;
+	}
+	// darker
+	if (part == 1) {
+		float const d = 0.3f;
+		for (int i = 0; i < particles.size(); i++) {
+			vec3 const& pi = particles[i].p;
+			float const r = norm(pi - p0) / d;
+			density += 0.15f * std::exp(-r * r);
+		}
+		density -= 0.4f;
+
+		vec3 color = vec3(clamp(1 - density, 0, 1), clamp(1 - density, 0, 1), 1 - density / 3.0f);
+		if (density < 0.2f) {
+			color = { 0.9,0.9,0.9 };
+		}
+		return color;
+	}
+	
+	return vec3(0,0,0);
 }
 
-vec3 W_gradient_pressure(vec3 const& p_i, vec3 const& p_j, float h)
-{
-	// To do ...
-	//  Fill it with gradient of W_spiky
-	float const r = norm(p_i - p_j);
-	assert_vcl_no_msg(r <= h);
-	return -45 / (3.14159f * std::pow(h, 6.0f)) * std::pow(h - r, 2) * (p_i - p_j) / r;
+vec3 from_grid_to_world(vec3 grid_coord, vec3 center_grid, float step, int part) {
+	// if cube
+	// return grid_coord / step + center_grid;
+	
+	if (part == 0) { // before the water fall
+		// start above the waterfall ie 4.2 > x > 1 and y between -1 and 1 and z between 2.9 and 3.9
+		float x = 1.0f + grid_coord.x / (step - 1) * 3.2f;
+		float y = -1.0f + grid_coord.y / (step - 1) * 2.0f;
+		float z = 2.2f + grid_coord.z / (step - 1) * 1.2f;
+		return vec3(x, y, z);
+	}
+	if (part == 1) { // the waterfall
+		// start above the waterfall ie 1 > x > 0 and y between -1 and 1 and z between 2.9 and 0
+		float x =-1.5f +  grid_coord.x / (step - 1)*2.5f;
+		float y = -1.0f + grid_coord.y / (step - 1) * 2.0f;
+		float z = grid_coord.z / (step - 1) * 3.0f;
+		return vec3(x, y, z);
+	}
+	if (part == 2) { // the lake
+		// start above the waterfall ie 0 > x > -4 and y between -2 and 2 and z between 0.5 and 0
+		float x = -4.0f + grid_coord.x / (step - 1)*4.0f;
+		float y = -2.0f + grid_coord.y / (step - 1) * 4.0f;
+		float z = -2.0f + grid_coord.z / (step - 1) * 2.5f;
+		return vec3(x, y, z);
+	}
+	
+
 }
 
-float W_density(vec3 const& p_i, const vec3& p_j, float h)
-{
-	float const r = norm(p_i - p_j);
-	assert_vcl_no_msg(r <= h);
-	return 315.0 / (64.0 * 3.14159f * std::pow(h, 9)) * std::pow(h * h - r * r, 3.0f);
+vec3 from_world_to_grid(vec3 world_coord, vec3 center_grid, float step) {
+	return (world_coord - center_grid) * step;
 }
 
-
-void update_density(std::vector<particle_element>& particles, float h, float m)
-{
-	// To do: Compute the density value (particles[i].rho) at each particle position
-	//  rho_i = \sum_j m W_density(pi,pj)
-	size_t const N = particles.size();
-	for (size_t i = 0; i < N; ++i) {
-		particles[i].rho = 0.0f;
-		for (size_t j = 0; j < N; j++) {
-			if (norm(particles[i].p - particles[j].p) < h) {
-				particles[i].rho += m * W_density(particles[i].p, particles[j].p, h); // to be modified
+void compute_water(int part) {
+	vcl::grid_3D<float> grid;
+	grid.resize(grid_n, grid_n, grid_n);
+	for (int i = 0; i < grid_n; i++) {
+		for (int j = 0; j < grid_n; j++) {
+			for (int k = 0; k < grid_n; k++) {
+				vec3 pos = from_grid_to_world({ i,j,k }, grid_center, grid_n,part);
+				grid(i, j, k) = get_density(pos.x, pos.y, pos.z, grid_n);
+				// std::cout << pos << " " << grid(i, j, k)  << std::endl;
 			}
 		}
 	}
 
-
-}
-
-// Convert the particle density to pressure
-void update_pressure(std::vector<particle_element>& particles, float rho0, float stiffness)
-{
-	const size_t N = particles.size();
-	for (size_t i = 0; i < N; ++i)
-		particles[i].pressure = density_to_pressure(particles[i].rho, rho0, stiffness);
-}
-
-// Compute the forces and update the acceleration of the particles
-void update_force(std::vector<particle_element>& particles, float h, float m, float nu)
-{
-	// gravity
-	const size_t N = particles.size();
-	for (size_t i = 0; i < N; ++i) {
-		particles[i].f = m * vec3{ 0,0,-9.81f };
-		for (size_t j = 0; j < N; ++j) {
-			if (i == j) {
-				continue;
-			}
-			const vec3& pi = particles[i].p;
-			const vec3& pj = particles[j].p;
-			float r = norm(pi - pj);
-			if (r < h) {
-				const vec3& vi = particles[i].v;
-				const vec3& vj = particles[j].v;
-
-				const float pressure_i = particles[i].pressure;
-				const float pressure_j = particles[j].pressure;
-
-				const float rho_i = particles[i].rho;
-				const float rho_j = particles[j].rho;
-
-				vec3 force_pressure = { 0,0,0 };
-				vec3 force_viscosity = { 0,0,0 };
-
-				force_pressure = -m / rho_i * (pressure_i + pressure_j) / (2 * rho_j) * W_gradient_pressure(pi, pj, h);
-				force_viscosity = m * nu * m * (vj - vi) / rho_j * W_laplacian_viscosity(pi, pj, h);
-
-
-				particles[i].f += force_pressure + force_viscosity;
-
-			}
-
-		}
-	}
-
-
-}
-
-void simulate(float dt, std::vector<particle_element>& particles, sph_parameters_structure const& sph_parameters)
-{
-
-	// Update values
-	update_density(particles, sph_parameters.h, sph_parameters.m);                   // First compute updated density
-	update_pressure(particles, sph_parameters.rho0, sph_parameters.stiffness);       // Compute associated pressure
-	update_force(particles, sph_parameters.h, sph_parameters.m, sph_parameters.nu);  // Update forces
-
-	// Numerical integration
-	float const damping = 0.005f;
-	size_t const N = particles.size();
-	float const m = sph_parameters.m;
-	for (size_t k = 0; k < N; ++k)
-	{
-		vec3& p = particles[k].p;
-		vec3& v = particles[k].v;
-		vec3& f = particles[k].f;
-		//float const rho = particles[k].rho;
-
-		v = (1 - damping) * v + dt * f / m;//rho;
-		p = p + dt * v;
-	}
-
-
-	// Collision
-	float const epsilon = 1e-3f;
-	for (size_t k = 0; k < N; ++k)
-	{
-		vec3& p = particles[k].p;
-		vec3& v = particles[k].v;
-
-		// small perturbation to avoid alignment
-		
-		float y_limit = evaluate_y(p.x);
-		
-		if (p.y > y_limit) {
-			p.y = y_limit - epsilon * rand_interval();
-			v.y *= -0.5f;
-		}
-		
-		if (p.y < -y_limit) {
-			p.y = -y_limit + epsilon * rand_interval();
-			v.y *= -0.5f;
-		}
-		if (evaluate_z(p.x, p.y) > p.z) {
-			p.z = evaluate_z(p.x, p.y) + epsilon * rand_interval();
-			v.z *= -0.5f;
-		}
-
-		if (p.x > 1.0f && p.z > evaluate_z(p.x, p.y) + 0.2f) {
-			p.z = 0.2f + evaluate_z(p.x, p.y) - epsilon * rand_interval();
-			v.z *= -0.5f;
-		}
-
-
-		if (p.x < -2) { p.x = -2 + epsilon * rand_interval();  v.x *= -0.5f; }
-		if (p.x > 4) { p.x = 4 - epsilon * rand_interval();  v.x *= -0.5f; }
+	marching_cubes marching;
+	mesh sur = marching.marching_cube(grid, grid_n, 0.001);
+	sur.color.resize(sur.position.size());
+	for (int i = 0; i < sur.position.size(); i++) {
+		sur.position(i) = from_grid_to_world(sur.position(i), grid_center, grid_n,part);
+		sur.color(i) = get_density_2(sur.position(i).x, sur.position(i).y, sur.position(i).z, grid_n,part); ;
 
 	}
-		
 
+	sur.uv.resize(sur.position.size());
+
+	if (sur.position.size() != 0) {
+		water = mesh_drawable(sur);
+	}
+	else {
+		water = mesh_drawable(mesh_primitive_cube({ -1,-1,-1 },0.001f));
+	}
+	
 }
+
 
 // Function called every time the screen is resized
 void window_size_callback(GLFWwindow*, int width, int height)
